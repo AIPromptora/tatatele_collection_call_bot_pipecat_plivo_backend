@@ -1,8 +1,5 @@
 import asyncio
 import os
-import wave
-import struct
-from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 from loguru import logger
@@ -12,8 +9,6 @@ from pipecat.frames.frames import (
     Frame,
     TTSSpeakFrame,
     TranscriptionFrame,
-    AudioRawFrame,
-    InputAudioRawFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -41,87 +36,6 @@ from pipecat.services.sarvam.tts import SarvamTTSService
 load_dotenv(override=True)
 
 
-# ── Audio capture processor ────────────────────────────────────────────────────
-
-class _AudioCapture(FrameProcessor):
-    """Silently buffers audio frames passing through — zero impact on pipeline."""
-
-    def __init__(self, capture_input: bool = False):
-        super().__init__()
-        self._capture_input = capture_input  # True = user mic, False = bot TTS
-        self.chunks: list[bytes] = []
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        if self._capture_input and isinstance(frame, InputAudioRawFrame):
-            self.chunks.append(frame.audio)
-        elif not self._capture_input and isinstance(frame, AudioRawFrame):
-            self.chunks.append(frame.audio)
-        await self.push_frame(frame, direction)
-
-    def get_bytes(self) -> bytes:
-        return b"".join(self.chunks)
-
-
-def _save_recording(
-    user_bytes: bytes,
-    bot_bytes: bytes,
-    sample_rate: int = 8000,
-    session_id: str = "",
-) -> str | None:
-    """Mix user + bot PCM and save as MP3 (falls back to WAV if pydub/ffmpeg unavailable)."""
-    if not user_bytes and not bot_bytes:
-        logger.warning("[recording] No audio captured — skipping save")
-        return None
-
-    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
-    os.makedirs(recordings_dir, exist_ok=True)
-
-    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    sid = session_id[-8:] if session_id else "webrtc"
-
-    try:
-        from pydub import AudioSegment
-
-        def _to_segment(raw: bytes) -> AudioSegment:
-            return AudioSegment(raw, sample_width=2, frame_rate=sample_rate, channels=1)
-
-        user_seg = _to_segment(user_bytes) if user_bytes else AudioSegment.silent(0, frame_rate=sample_rate)
-        bot_seg  = _to_segment(bot_bytes)  if bot_bytes  else AudioSegment.silent(0, frame_rate=sample_rate)
-
-        # Pad shorter track so overlay works correctly
-        diff = len(user_seg) - len(bot_seg)
-        if diff > 0:
-            bot_seg  = bot_seg  + AudioSegment.silent(diff,  frame_rate=sample_rate)
-        elif diff < 0:
-            user_seg = user_seg + AudioSegment.silent(-diff, frame_rate=sample_rate)
-
-        mixed    = user_seg.overlay(bot_seg)
-        filepath = os.path.join(recordings_dir, f"webrtc_{ts}_{sid}.mp3")
-        mixed.export(filepath, format="mp3")
-        logger.info(f"[recording] Saved MP3 → {filepath} ({len(mixed)/1000:.1f}s)")
-        return filepath
-
-    except Exception as e:
-        logger.warning(f"[recording] MP3 save failed ({e}) — falling back to WAV")
-        try:
-            # WAV fallback — no ffmpeg needed
-            all_bytes = user_bytes + bot_bytes  # sequential, not mixed
-            filepath  = os.path.join(recordings_dir, f"webrtc_{ts}_{sid}.wav")
-            with wave.open(filepath, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(all_bytes)
-            logger.info(f"[recording] Saved WAV → {filepath}")
-            return filepath
-        except Exception as e2:
-            logger.error(f"[recording] WAV save also failed: {e2}")
-            return None
-
-
-# ── Transcription logger ───────────────────────────────────────────────────────
-
 class TranscriptionLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -130,15 +44,11 @@ class TranscriptionLogger(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-# ── Core bot pipeline ──────────────────────────────────────────────────────────
-
 async def run_bot(
     transport: BaseTransport,
     handle_sigint: bool,
     body: Optional[dict] = None,
     transcript_out: Optional[list] = None,
-    user_capture: Optional[_AudioCapture] = None,
-    bot_capture: Optional[_AudioCapture] = None,
 ):
     llm = OpenAILLMService(
         api_key="local",
@@ -169,7 +79,6 @@ async def run_bot(
         "Marathi":  "mr-IN",
         "Gujarati": "gu-IN",
         "Bengali":  "bn-IN",
-        "Telugu":   "te-IN",
     }
 
     tts = SarvamTTSService(
@@ -189,27 +98,23 @@ async def run_bot(
     greetings = {
         "English": (
             f"Hi, this is {agent_name} from Tata Tele services regarding a pending payment for {service_name}. "
-            f"Would you like to continue in English, Hindi, Marathi, Gujarati, Bengali, or Telugu?"
+            f"Would you like to continue in English or Hindi, Marathi, Gujarati, Bengali?"
         ),
         "Hindi": (
             f"नमस्ते, मैं {agent_name} बोल रहा हूँ Tata Tele services से, आपके {service_name} के pending payment के बारे में। "
-            f"क्या आप Hindi, English, Marathi, Gujarati, Bengali, या Telugu में बात करना चाहेंगे?"
+            f"क्या आप हिंदी में बात करना चाहेंगे या English, Marathi, Gujarati, Bengali?"
         ),
         "Marathi": (
             f"नमस्कार, मी {agent_name} बोलतोय Tata Tele services कडून, आपल्या {service_name} च्या pending payment बद्दल। "
-            f"आपण Marathi, English, Hindi, Gujarati, Bengali, किंवा Telugu मध्ये बोलू का?"
+            f"आपण मराठीत बोलू का, की English, Hindi, Gujarati, Bengali?"
         ),
         "Gujarati": (
             f"નમસ્તે, હું {agent_name} બોલું છું Tata Tele services તરફથી, તમારા {service_name} ના pending payment વિશે। "
-            f"તમે Gujarati, English, Hindi, Marathi, Bengali, અથવા Telugu માં વાત કરશો?"
+            f"તમે ગુજરાતી માં વાત કરશો કે English, Hindi, Marathi, Bengali?"
         ),
         "Bengali": (
             f"নমস্কার, আমি {agent_name} বলছি Tata Tele services থেকে, আপনার {service_name}-এর pending payment সম্পর্কে। "
-            f"আপনি Bengali, English, Hindi, Marathi, Gujarati, নাকি Telugu তে কথা বলবেন?"
-        ),
-        "Telugu": (
-            f"నమస్కారం, నేను {agent_name} మాట్లాడుతున్నాను Tata Tele services నుండి, మీ {service_name} కి సంబంధించిన pending payment గురించి। "
-            f"మీరు Telugu, English, Hindi, Marathi, Gujarati, లేదా Bengali లో మాట్లాడతారా?"
+            f"আপনি কি বাংলায় কথা বলবেন, না English, Hindi, Marathi, Gujarati?"
         ),
     }
 
@@ -287,7 +192,7 @@ async def run_bot(
         - Maintain a respectful and calm tone.
 
         LANGUAGE RULES:
-        - You can only understand and speak in English, Hindi, Marathi, Gujarati, Bengali, and Telugu.
+        - You can only understand and speak in English, Hindi, Marathi, Gujarati, and Bengali.
         - ALWAYS respond in the same language the customer is speaking.
         - If they switch language mid-call, you switch too. So strictly understand which language user is speaking and reply in that language. If you are not clear about anything, then take the input from the user and continue the conversation.
 
@@ -321,14 +226,6 @@ async def run_bot(
         - Keep sentences under 20 words.
         - Use polite forms (আপনি) consistently throughout the call.
 
-        Telugu:
-        - Warm, natural Tenglish — mix English words freely and naturally (e.g. payment, invoice, amount, bill, due date).
-        - Use Telugu script only for Telugu words (no Roman transliteration — it degrades TTS).
-        - Every Telugu sentence must end with । (danda), NEVER a period (.).
-        - Keep sentences under 20 words.
-        - Use polite forms (మీరు) consistently throughout the call.
-        - Sound natural and conversational — like how Telugu people actually speak with English mixed in.
-
         - If customer mixes any of these languages freely, respond in the same casual mixed style.
 
         CLOSING THE CALL:
@@ -338,7 +235,6 @@ async def run_bot(
         Marathi:  "आपल्या वेळासाठी धन्यवाद। काही प्रश्न असल्यास आम्हाला call करा। Have a great day!"
         Gujarati: "તમારા સમય બદલ આભાર। કોઈ પ્રશ્ન હોય તો અમને call કરો। Have a great day!"
         Bengali:  "আপনার সময়ের জন্য ধন্যবাদ। কোনো প্রশ্ন থাকলে আমাদের call করুন। Have a great day!"
-        Telugu:   "మీ time కి చాలా thanks। ఏదైనా అవసరమైతే మాకు call చేయండి। Have a great day!"
         """
 
     logger.info(f"SYSTEM PROMPT ({'─'*60})\n{system_content}\n{'─'*70}")
@@ -358,25 +254,18 @@ async def run_bot(
         ),
     )
 
-    # Build pipeline — insert capture processors when recording is enabled
-    pipeline_stages = [transport.input()]
-    if user_capture is not None:
-        pipeline_stages.append(user_capture)
-    pipeline_stages += [
-        stt,
-        TranscriptionLogger(),
-        user_aggregator,
-        llm,
-        tts,
-    ]
-    if bot_capture is not None:
-        pipeline_stages.append(bot_capture)
-    pipeline_stages += [
-        transport.output(),
-        assistant_aggregator,
-    ]
-
-    pipeline = Pipeline(pipeline_stages)
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            stt,
+            TranscriptionLogger(),
+            user_aggregator,
+            llm,
+            tts,
+            transport.output(),
+            assistant_aggregator,
+        ]
+    )
 
     task = PipelineTask(
         pipeline,
@@ -446,9 +335,6 @@ async def bot(runner_args: RunnerArguments, transcript_out: Optional[list] = Non
 # ── WebRTC entry point ────────────────────────────────────────────────────────
 
 async def webrtc_bot(webrtc_connection: SmallWebRTCConnection, body: dict | None = None):
-    user_capture = _AudioCapture(capture_input=True)
-    bot_capture  = _AudioCapture(capture_input=False)
-
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(
@@ -456,19 +342,4 @@ async def webrtc_bot(webrtc_connection: SmallWebRTCConnection, body: dict | None
             audio_out_enabled=True,
         ),
     )
-
-    await run_bot(
-        transport,
-        handle_sigint=False,
-        body=body,
-        user_capture=user_capture,
-        bot_capture=bot_capture,
-    )
-
-    # Session ended — save recording
-    _save_recording(
-        user_bytes=user_capture.get_bytes(),
-        bot_bytes=bot_capture.get_bytes(),
-        sample_rate=8000,
-        session_id=getattr(webrtc_connection, "pc_id", ""),
-    )
+    await run_bot(transport, handle_sigint=False, body=body)
