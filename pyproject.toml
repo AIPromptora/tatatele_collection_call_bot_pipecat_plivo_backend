@@ -13,6 +13,7 @@ dependencies = [
     "openpyxl",
     "python-multipart",
     "openai",
+    "pydub",
 ]
 
 [tool.uv]
