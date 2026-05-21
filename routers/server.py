@@ -8,11 +8,12 @@ import urllib.parse
 
 import aiohttp
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 from loguru import logger as _logger
+from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -47,6 +48,14 @@ load_dotenv(override=True)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+
+# ── WebRTC state ──────────────────────────────────────────────────────────────
+
+_pcs_map: dict[str, SmallWebRTCConnection] = {}
+
+_ice_servers = [IceServer(urls="stun:stun.l.google.com:19302")]
+
+# ── Call rate limiting ─────────────────────────────────────────────────────────
 
 CALL_INITIATION_GAP_MS = 1000
 _call_initiation_lock = asyncio.Lock()
@@ -211,6 +220,9 @@ async def lifespan(app: FastAPI):
     yield
     await app.state.session.close()
     await close_db()
+    coros = [pc.disconnect() for pc in _pcs_map.values()]
+    await asyncio.gather(*coros)
+    _pcs_map.clear()
 
 
 app = FastAPI(title="Tata Tele Call Bot", version="1.0.0", lifespan=lifespan)
@@ -439,6 +451,39 @@ async def recording_ready(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+# ── WebRTC ─────────────────────────────────────────────────────────────────────
+
+@app.post("/api/offer")
+async def webrtc_offer(request: dict, background_tasks: BackgroundTasks) -> dict:
+    pc_id = request.get("pc_id")
+    body  = request.get("body") or {}
+
+    if pc_id and pc_id in _pcs_map:
+        conn = _pcs_map[pc_id]
+        _logger.info(f"[webrtc] Renegotiating existing session pc_id={pc_id}")
+        await conn.renegotiate(
+            sdp=request["sdp"],
+            type=request["type"],
+            restart_pc=request.get("restart_pc", False),
+        )
+    else:
+        conn = SmallWebRTCConnection(_ice_servers)
+        await conn.initialize(sdp=request["sdp"], type=request["type"])
+
+        @conn.event_handler("closed")
+        async def on_closed(c: SmallWebRTCConnection):
+            _logger.info(f"[webrtc] Connection closed — removing pc_id={c.pc_id}")
+            _pcs_map.pop(c.pc_id, None)
+
+        from helpers.bot import webrtc_bot
+        background_tasks.add_task(webrtc_bot, conn, body)
+        _logger.info(f"[webrtc] New WebRTC session started")
+
+    answer = conn.get_answer()
+    _pcs_map[answer["pc_id"]] = conn
+    return answer
+
+
 # ── LLM Test ──────────────────────────────────────────────────────────────────
 
 @app.post("/test-llm")
@@ -497,5 +542,4 @@ async def get_log_detail(call_uuid: str) -> JSONResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8009)
- 
+    uvicorn.run(app, host="0.0.0.0", port=8011)

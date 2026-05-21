@@ -18,14 +18,16 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.plivo import PlivoFrameSerializer
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transcriptions.language import Language
-from pipecat.transports.base_transport import BaseTransport
+from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
@@ -88,8 +90,8 @@ async def run_bot(
             temperature=0.8
         )
     )
-  
-    logger.info(f"TTS: Sarvam bulbul:v3 aditya ({language} → {_lang_code_map.get(language, 'en-IN')})") 
+
+    logger.info(f"TTS: Sarvam bulbul:v3 shubh ({language} → {_lang_code_map.get(language, 'en-IN')})")
 
     # ── Greeting ──────────────────────────────────────────────────────────────
 
@@ -298,8 +300,7 @@ async def run_bot(
             logger.info(f"Transcript snapshot: {len(transcript_out)} turns")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
+# ── Telephony entry point ─────────────────────────────────────────────────────
 
 async def bot(runner_args: RunnerArguments, transcript_out: Optional[list] = None):
     transport_type, call_data = await parse_telephony_websocket(runner_args.websocket)
@@ -329,3 +330,16 @@ async def bot(runner_args: RunnerArguments, transcript_out: Optional[list] = Non
     )
 
     await run_bot(transport, runner_args.handle_sigint, body=body, transcript_out=transcript_out)
+
+
+# ── WebRTC entry point ────────────────────────────────────────────────────────
+
+async def webrtc_bot(webrtc_connection: SmallWebRTCConnection, body: dict | None = None):
+    transport = SmallWebRTCTransport(
+        webrtc_connection=webrtc_connection,
+        params=TransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+        ),
+    )
+    await run_bot(transport, handle_sigint=False, body=body)
