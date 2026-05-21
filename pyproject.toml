@@ -1,0 +1,19 @@
+[project]
+name = "hospital-call-bot"
+version = "1.0.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pipecat-ai[cartesia,elevenlabs,openai,sarvam,silero,soundfile]",
+    "asyncpg",
+    "aiohttp",
+    "python-dotenv",
+    "loguru",
+    "openpyxl",
+    "python-multipart",
+    "openai",
+]
+
+[tool.uv]
+prerelease = "allow"
