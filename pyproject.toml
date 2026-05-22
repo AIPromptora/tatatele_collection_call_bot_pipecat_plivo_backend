@@ -12,6 +12,7 @@ dependencies = [
     "loguru",
     "openpyxl",
     "python-multipart",
+    "httpx",
     "openai",
     "pydub",
 ]

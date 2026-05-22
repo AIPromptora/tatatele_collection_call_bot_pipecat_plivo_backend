@@ -215,7 +215,9 @@ async def make_plivo_call(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from helpers.db import init_db, close_db
+    from helpers.ultravox_setup import ensure_ultravox_agent
     await init_db()
+    await ensure_ultravox_agent()
     app.state.session = aiohttp.ClientSession()
     yield
     await app.state.session.close()
@@ -482,6 +484,97 @@ async def webrtc_offer(request: dict, background_tasks: BackgroundTasks) -> dict
     answer = conn.get_answer()
     _pcs_map[answer["pc_id"]] = conn
     return answer
+
+
+# ── Ultravox (browser WebRTC via ultravox-client SDK) ─────────────────────────
+
+@app.post("/api/call/start")
+async def ultravox_call_start(request: Request) -> JSONResponse:
+    """Start an Ultravox browser call; returns joinUrl for the frontend SDK."""
+    if not os.getenv("ULTRAVOX_API_KEY", "").strip():
+        raise HTTPException(
+            status_code=503,
+            detail="Ultravox is not configured. Set ULTRAVOX_API_KEY in backend .env",
+        )
+
+    agent_id = os.getenv("AGENT_ID", "").strip().strip("'\"")
+    if not agent_id:
+        raise HTTPException(
+            status_code=503,
+            detail="AGENT_ID is not configured. Restart the server to create an Ultravox agent.",
+        )
+
+    data = await request.json()
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+
+    from helpers.ultravox_api import create_agent_call
+
+    try:
+        call = await create_agent_call(agent_id=agent_id, metadata=metadata)
+    except Exception as e:
+        _logger.error(f"[ultravox] Failed to create call: {e}")
+        raise HTTPException(status_code=502, detail=f"Ultravox API error: {e}")
+
+    return JSONResponse({"callId": call["callId"], "joinUrl": call["joinUrl"]})
+
+
+@app.post("/api/outbound/call")
+async def ultravox_outbound_call(request: Request) -> JSONResponse:
+    """Initiate an outbound Plivo call via Ultravox."""
+    if not os.getenv("ULTRAVOX_API_KEY", "").strip():
+        raise HTTPException(
+            status_code=503,
+            detail="Ultravox is not configured. Set ULTRAVOX_API_KEY in backend .env",
+        )
+
+    agent_id = os.getenv("AGENT_ID", "").strip().strip("'\"")
+    if not agent_id:
+        raise HTTPException(status_code=503, detail="AGENT_ID is not configured.")
+
+    from_number = (
+        os.getenv("PLIVO_FROM_NUMBER", "").strip()
+        or os.getenv("PLIVO_PHONE_NUMBER", "").strip()
+    )
+    if not from_number:
+        raise HTTPException(
+            status_code=503,
+            detail="PLIVO_FROM_NUMBER or PLIVO_PHONE_NUMBER is not configured.",
+        )
+
+    data = await request.json()
+    phone_number = str(data.get("phone_number", "")).strip().replace(" ", "").replace("-", "")
+    if not phone_number:
+        raise HTTPException(status_code=400, detail="Missing phone_number")
+
+    metadata = None
+    if isinstance(data, dict):
+        metadata = {
+            k: str(v)
+            for k, v in data.items()
+            if k not in ("phone_number",) and v is not None
+        } or None
+
+    from helpers.ultravox_api import create_outbound_call
+
+    try:
+        await _wait_for_call_slot()
+        call = await create_outbound_call(
+            agent_id=agent_id,
+            to_number=phone_number,
+            from_number=from_number,
+            metadata=metadata,
+        )
+    except Exception as e:
+        _logger.error(f"[ultravox] Outbound call failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Ultravox API error: {e}")
+
+    _logger.info(f"[ultravox] Outbound call initiated callId={call['callId']} to={phone_number}")
+    return JSONResponse({
+        "callId": call["callId"],
+        "status": "initiated",
+        "to_number": phone_number,
+        "message": f"Calling {phone_number}. The AI will connect shortly.",
+    })
 
 
 # ── LLM Test ──────────────────────────────────────────────────────────────────

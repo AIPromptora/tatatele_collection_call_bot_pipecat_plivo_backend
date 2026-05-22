@@ -86,7 +86,7 @@ async def run_bot(
         voice_id="shubh",
         model="bulbul:v3",
         params=SarvamTTSService.InputParams(
-            pace=1.0,
+            pace=0.9,
             temperature=0.8
         )
     )
@@ -172,7 +172,7 @@ async def run_bot(
         → Apologize sincerely. Do not escalate. Tell them you will immediately update your internal team and have the right support person contact them. Do not ask or repeat for payment timeline in this case.
 
         Customer says they already paid:
-        → Apologize — it may not have reflected in records yet. Thank them for paying and close the call.
+        → Apologize — it may not have reflected in records yet, and ask them the details of the payment. Thank them for paying and close the call.
 
         IMPORTANT CONVERSATION RULES:
         - Listen carefully. The customer may not respond exactly as expected — understand the intent and respond appropriately.
@@ -190,6 +190,9 @@ async def run_bot(
         - Politely decline personal questions.
         - Always redirect to the business goal (support or payment).
         - Maintain a respectful and calm tone.
+        - Always have meaningful, context-aware responses. We should respond in the most meaningful way based on the user response.
+        - Use meaningful validations whenever required. For example, if user says they are busy, ask when would be a good time to call back. If they say they have a dispute, ask what the dispute is about. If they say they will pay soon, ask when exactly they will pay.
+
 
         LANGUAGE RULES:
         - You can only understand and speak in English, Hindi, Marathi, Gujarati, and Bengali.
