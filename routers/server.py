@@ -46,8 +46,7 @@ _logger.add(
 
 load_dotenv(override=True)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+from helpers.supabase_push import push_to_supabase
 
 # ── WebRTC state ──────────────────────────────────────────────────────────────
 
@@ -79,104 +78,6 @@ async def _wait_for_call_slot() -> None:
 
 
 # ── Supabase helpers ───────────────────────────────────────────────────────────
-
-def _sb_json_headers(access_token: str) -> dict:
-    return {
-        "apikey":        SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type":  "application/json",
-        "Prefer":        "return=representation",
-    }
-
-def _sb_storage_headers(access_token: str) -> dict:
-    return {
-        "apikey":        SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type":  "audio/mpeg",
-    }
-
-
-async def _push_to_supabase(
-    session: aiohttp.ClientSession,
-    call_uuid: str,
-    phone_number: str,
-    user_id: str | None,
-    access_token: str,
-    mp3_bytes: bytes,
-) -> None:
-    if not SUPABASE_URL or not access_token:
-        _logger.error(f"[{call_uuid}] Missing SUPABASE_URL or access_token")
-        return
-
-    # 1. Insert call_analyses row
-    payload = {
-        "filename":      f"Call to {phone_number}",
-        "mobile_number": phone_number,
-        "status":        "uploading",
-    }
-    if user_id:
-        payload["user_id"] = user_id
-
-    analysis_id = None
-    async with session.post(
-        f"{SUPABASE_URL}/rest/v1/call_analyses",
-        json=payload,
-        headers=_sb_json_headers(access_token),
-    ) as resp:
-        if resp.status in (200, 201):
-            rows = await resp.json()
-            analysis_id = rows[0]["id"] if rows else None
-            _logger.info(f"[{call_uuid}] call_analyses row created — id={analysis_id}")
-        else:
-            err = await resp.text()
-            _logger.error(f"[{call_uuid}] Failed to insert call_analyses: {resp.status} {err}")
-            return
-
-    if not analysis_id:
-        _logger.error(f"[{call_uuid}] No analysis_id returned from Supabase insert")
-        return
-
-    # 2. Upload MP3 to Supabase storage (in-memory, no disk)
-    file_path = f"{analysis_id}/recording.mp3"
-    async with session.post(
-        f"{SUPABASE_URL}/storage/v1/object/call-recordings/{file_path}",
-        data=mp3_bytes,
-        headers=_sb_storage_headers(access_token),
-    ) as resp:
-        if resp.status not in (200, 201):
-            err = await resp.text()
-            _logger.error(f"[{call_uuid}] Storage upload failed: {resp.status} {err}")
-            async with session.patch(
-                f"{SUPABASE_URL}/rest/v1/call_analyses?id=eq.{analysis_id}",
-                json={"status": "failed"},
-                headers=_sb_json_headers(access_token),
-            ) as _:
-                pass
-            return
-        _logger.info(f"[{call_uuid}] MP3 uploaded to Supabase storage → {file_path}")
-
-    # 3. Update row: file_path + status transcribing
-    async with session.patch(
-        f"{SUPABASE_URL}/rest/v1/call_analyses?id=eq.{analysis_id}",
-        json={"file_path": file_path, "status": "transcribing"},
-        headers=_sb_json_headers(access_token),
-    ) as resp:
-        if resp.status not in (200, 204):
-            err = await resp.text()
-            _logger.error(f"[{call_uuid}] Failed to update call_analyses status: {resp.status} {err}")
-
-    # 4. Invoke process-call edge function
-    async with session.post(
-        f"{SUPABASE_URL}/functions/v1/process-call",
-        json={"analysisId": analysis_id, "filePath": file_path},
-        headers=_sb_json_headers(access_token),
-    ) as resp:
-        if resp.status not in (200, 201):
-            err = await resp.text()
-            _logger.error(f"[{call_uuid}] Edge function failed: {resp.status} {err}")
-        else:
-            _logger.info(f"[{call_uuid}] process-call edge function invoked ✓")
-
 
 # ── Plivo call helper ──────────────────────────────────────────────────────────
 
@@ -439,7 +340,7 @@ async def recording_ready(request: Request) -> JSONResponse:
 
     # Push to Supabase pipeline (non-blocking — errors are logged, not raised)
     try:
-        await _push_to_supabase(
+        await push_to_supabase(
             session      = request.app.state.session,
             call_uuid    = call_uuid,
             phone_number = phone_number,
@@ -456,9 +357,10 @@ async def recording_ready(request: Request) -> JSONResponse:
 # ── WebRTC ─────────────────────────────────────────────────────────────────────
 
 @app.post("/api/offer")
-async def webrtc_offer(request: dict, background_tasks: BackgroundTasks) -> dict:
-    pc_id = request.get("pc_id")
-    body  = request.get("body") or {}
+async def webrtc_offer(raw_request: Request, background_tasks: BackgroundTasks) -> dict:
+    request = await raw_request.json()
+    pc_id   = request.get("pc_id")
+    body    = request.get("body") or {}
 
     if pc_id and pc_id in _pcs_map:
         conn = _pcs_map[pc_id]
@@ -478,7 +380,7 @@ async def webrtc_offer(request: dict, background_tasks: BackgroundTasks) -> dict
             _pcs_map.pop(c.pc_id, None)
 
         from helpers.bot import webrtc_bot
-        background_tasks.add_task(webrtc_bot, conn, body)
+        background_tasks.add_task(webrtc_bot, conn, body, raw_request.app.state.session)
         _logger.info(f"[webrtc] New WebRTC session started")
 
     answer = conn.get_answer()

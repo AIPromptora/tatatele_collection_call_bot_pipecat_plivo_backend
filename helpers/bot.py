@@ -1,5 +1,7 @@
 import asyncio
 import os
+import uuid
+from io import BytesIO
 from typing import Optional
 from dotenv import load_dotenv
 from loguru import logger
@@ -9,6 +11,8 @@ from pipecat.frames.frames import (
     Frame,
     TTSSpeakFrame,
     TranscriptionFrame,
+    AudioRawFrame,
+    InputAudioRawFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -36,6 +40,111 @@ from pipecat.services.sarvam.tts import SarvamTTSService
 load_dotenv(override=True)
 
 
+# ── Audio capture ──────────────────────────────────────────────────────────────
+
+class _AudioCapture(FrameProcessor):
+    """
+    Buffers PCM audio frames without affecting the pipeline.
+    Reads sample_rate and num_channels directly from each frame so the
+    saved recording always matches the actual audio rate — fixes slow-motion
+    playback caused by a sample-rate mismatch between capture and pydub.
+    """
+
+    def __init__(self, capture_input: bool = False):
+        super().__init__()
+        self._capture_input = capture_input  # True = user mic, False = bot TTS
+        self.chunks: list[bytes] = []
+        self.sample_rate: int = 8000
+        self.num_channels: int = 1
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if self._capture_input and isinstance(frame, InputAudioRawFrame):
+            self.chunks.append(frame.audio)
+            self.sample_rate  = frame.sample_rate
+            self.num_channels = frame.num_channels
+        elif (
+            not self._capture_input
+            and isinstance(frame, AudioRawFrame)
+            and not isinstance(frame, InputAudioRawFrame)
+        ):
+            self.chunks.append(frame.audio)
+            self.sample_rate  = frame.sample_rate
+            self.num_channels = frame.num_channels
+        await self.push_frame(frame, direction)
+
+    def get_bytes(self) -> bytes:
+        return b"".join(self.chunks)
+
+
+def _mix_to_mp3_bytes(
+    user_cap: "_AudioCapture",
+    bot_cap: "_AudioCapture",
+) -> bytes | None:
+    """
+    Mix user-mic and bot-TTS PCM into a single MP3 (in memory).
+    Both tracks are resampled to the higher of the two sample rates and
+    converted to mono before overlaying — this ensures correct playback speed
+    regardless of what rate the WebRTC transport delivers.
+    """
+    user_bytes = user_cap.get_bytes()
+    bot_bytes  = bot_cap.get_bytes()
+
+    if not user_bytes and not bot_bytes:
+        logger.warning("[recording] No audio captured — nothing to mix")
+        return None
+
+    try:
+        from pydub import AudioSegment
+
+        def _to_seg(raw: bytes, cap: "_AudioCapture") -> AudioSegment:
+            return AudioSegment(
+                raw,
+                sample_width=2,          # 16-bit PCM (pipecat standard)
+                frame_rate=cap.sample_rate,
+                channels=cap.num_channels,
+            )
+
+        user_seg = (
+            _to_seg(user_bytes, user_cap)
+            if user_bytes
+            else AudioSegment.silent(0, frame_rate=user_cap.sample_rate)
+        )
+        bot_seg = (
+            _to_seg(bot_bytes, bot_cap)
+            if bot_bytes
+            else AudioSegment.silent(0, frame_rate=bot_cap.sample_rate)
+        )
+
+        # Normalise: mono + same sample rate so overlay works correctly
+        target_rate = max(user_cap.sample_rate, bot_cap.sample_rate)
+        user_seg = user_seg.set_channels(1).set_frame_rate(target_rate)
+        bot_seg  = bot_seg.set_channels(1).set_frame_rate(target_rate)
+
+        # Pad the shorter track
+        diff = len(user_seg) - len(bot_seg)
+        if diff > 0:
+            bot_seg  = bot_seg  + AudioSegment.silent(diff,  frame_rate=target_rate)
+        elif diff < 0:
+            user_seg = user_seg + AudioSegment.silent(-diff, frame_rate=target_rate)
+
+        mixed = user_seg.overlay(bot_seg)
+        buf   = BytesIO()
+        mixed.export(buf, format="mp3", bitrate="64k")
+        mp3_bytes = buf.getvalue()
+        logger.info(
+            f"[recording] Mixed MP3 ready — "
+            f"{len(mixed)/1000:.1f}s @ {target_rate}Hz, {len(mp3_bytes)} bytes"
+        )
+        return mp3_bytes
+
+    except Exception as e:
+        logger.error(f"[recording] MP3 encoding failed: {e}")
+        return None
+
+
+# ── Transcription logger ───────────────────────────────────────────────────────
+
 class TranscriptionLogger(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -44,11 +153,15 @@ class TranscriptionLogger(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+# ── Core pipeline ──────────────────────────────────────────────────────────────
+
 async def run_bot(
     transport: BaseTransport,
     handle_sigint: bool,
     body: Optional[dict] = None,
     transcript_out: Optional[list] = None,
+    user_capture: Optional[_AudioCapture] = None,
+    bot_capture: Optional[_AudioCapture] = None,
 ):
     llm = OpenAILLMService(
         api_key="local",
@@ -257,18 +370,17 @@ async def run_bot(
         ),
     )
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            TranscriptionLogger(),
-            user_aggregator,
-            llm,
-            tts,
-            transport.output(),
-            assistant_aggregator,
-        ]
-    )
+    # ── Pipeline — captures inserted only when provided ────────────────────────
+
+    stages = [transport.input()]
+    if user_capture:
+        stages.append(user_capture)          # captures user mic PCM here
+    stages += [stt, TranscriptionLogger(), user_aggregator, llm, tts]
+    if bot_capture:
+        stages.append(bot_capture)           # captures bot TTS PCM here
+    stages += [transport.output(), assistant_aggregator]
+
+    pipeline = Pipeline(stages)
 
     task = PipelineTask(
         pipeline,
@@ -337,7 +449,14 @@ async def bot(runner_args: RunnerArguments, transcript_out: Optional[list] = Non
 
 # ── WebRTC entry point ────────────────────────────────────────────────────────
 
-async def webrtc_bot(webrtc_connection: SmallWebRTCConnection, body: dict | None = None):
+async def webrtc_bot(
+    webrtc_connection: SmallWebRTCConnection,
+    body: dict | None = None,
+    aiohttp_session=None,
+):
+    user_capture = _AudioCapture(capture_input=True)
+    bot_capture  = _AudioCapture(capture_input=False)
+
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(
@@ -345,4 +464,56 @@ async def webrtc_bot(webrtc_connection: SmallWebRTCConnection, body: dict | None
             audio_out_enabled=True,
         ),
     )
-    await run_bot(transport, handle_sigint=False, body=body)
+
+    await run_bot(
+        transport,
+        handle_sigint=False,
+        body=body,
+        user_capture=user_capture,
+        bot_capture=bot_capture,
+    )
+
+    # ── Post-session: mix audio and push to Supabase analysis pipeline ─────────
+
+    b            = body or {}
+    access_token = b.get("access_token", "").strip()
+    user_id      = b.get("user_id", "").strip() or None
+    customer_name = b.get("customer_name", "Browser User")
+    service_name  = b.get("service_name", "Voice Test")
+
+    if not access_token:
+        logger.warning("[webrtc] No access_token in body — skipping Supabase push")
+        return
+
+    mp3_bytes = _mix_to_mp3_bytes(user_capture, bot_capture)
+    if not mp3_bytes:
+        logger.warning("[webrtc] No audio to push — skipping Supabase push")
+        return
+
+    session_id = getattr(webrtc_connection, "pc_id", None) or str(uuid.uuid4())
+    filename   = f"Voice Test — {customer_name} ({service_name})"
+
+    from helpers.supabase_push import push_to_supabase
+    import aiohttp as _aiohttp
+
+    close_session = False
+    sess = aiohttp_session
+    if sess is None:
+        sess = _aiohttp.ClientSession()
+        close_session = True
+
+    try:
+        await push_to_supabase(
+            session      = sess,
+            call_uuid    = session_id,
+            phone_number = "WebRTC Browser Session",
+            user_id      = user_id,
+            access_token = access_token,
+            mp3_bytes    = mp3_bytes,
+            filename     = filename,
+        )
+    except Exception as e:
+        logger.error(f"[webrtc] Supabase push failed: {e}")
+    finally:
+        if close_session:
+            await sess.close()
