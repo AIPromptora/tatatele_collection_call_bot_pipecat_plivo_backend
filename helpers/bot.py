@@ -196,7 +196,7 @@ async def run_bot(
 
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY", ""),
-        voice_id="shubh",
+        voice_id=b.get("voice_id", "shubh"),
         model="bulbul:v3",
         params=SarvamTTSService.InputParams(
             pace=0.9,

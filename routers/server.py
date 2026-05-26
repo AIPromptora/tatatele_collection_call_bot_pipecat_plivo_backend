@@ -156,6 +156,7 @@ async def start_call(request: Request) -> JSONResponse:
     amount         = str(data.get("amount",         "0")).strip()
     billing_period = str(data.get("billing_period", "")).strip()
     language       = str(data.get("language",       "English")).strip()
+    voice_id       = str(data.get("voice_id",       "shubh")).strip() or "shubh"
 
     if not customer_name:
         raise HTTPException(status_code=400, detail="Missing customer_name")
@@ -168,6 +169,7 @@ async def start_call(request: Request) -> JSONResponse:
         "amount":         amount,
         "billing_period": billing_period,
         "language":       language,
+        "voice_id":       voice_id,
     }
 
     server_url = os.getenv("SERVER_URL", "").rstrip("/")
