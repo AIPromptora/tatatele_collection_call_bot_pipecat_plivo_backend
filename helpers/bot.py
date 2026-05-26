@@ -211,23 +211,11 @@ async def run_bot(
     greetings = {
         "English": (
             f"Hi, this is {agent_name} from Tata Tele services regarding a pending payment for {service_name}. "
-            f"Would you like to continue in English or Hindi, Marathi, Gujarati, Bengali?"
+            f"Would you like to continue in English or Hindi?"
         ),
         "Hindi": (
             f"नमस्ते, मैं {agent_name} बोल रहा हूँ Tata Tele services से, आपके {service_name} के pending payment के बारे में। "
-            f"क्या आप हिंदी में बात करना चाहेंगे या English, Marathi, Gujarati, Bengali?"
-        ),
-        "Marathi": (
-            f"नमस्कार, मी {agent_name} बोलतोय Tata Tele services कडून, आपल्या {service_name} च्या pending payment बद्दल। "
-            f"आपण मराठीत बोलू का, की English, Hindi, Gujarati, Bengali?"
-        ),
-        "Gujarati": (
-            f"નમસ્તે, હું {agent_name} બોલું છું Tata Tele services તરફથી, તમારા {service_name} ના pending payment વિશે। "
-            f"તમે ગુજરાતી માં વાત કરશો કે English, Hindi, Marathi, Bengali?"
-        ),
-        "Bengali": (
-            f"নমস্কার, আমি {agent_name} বলছি Tata Tele services থেকে, আপনার {service_name}-এর pending payment সম্পর্কে। "
-            f"আপনি কি বাংলায় কথা বলবেন, না English, Hindi, Marathi, Gujarati?"
+            f"क्या आप हिंदी में बात करना चाहेंगे या English में?"
         ),
     }
 
@@ -308,7 +296,7 @@ async def run_bot(
 
 
         LANGUAGE RULES:
-        - You can only understand and speak in English, Hindi, Marathi, Gujarati, and Bengali.
+        - You can only understand and speak in English and Hindi.
         - ALWAYS respond in the same language the customer is speaking.
         - If they switch language mid-call, you switch too. So strictly understand which language user is speaking and reply in that language. If you are not clear about anything, then take the input from the user and continue the conversation.
 
@@ -321,36 +309,12 @@ async def run_bot(
         - Every Hindi sentence must end with । (danda), NEVER a period (.).
         - Keep sentences under 20 words.
 
-        Marathi:
-        - Warm, conversational Marathi — mix common English words naturally (e.g. payment, invoice, amount).
-        - Use Devanagari script only (no Roman transliteration).
-        - Every Marathi sentence must end with । (danda), NEVER a period (.).
-        - Keep sentences under 20 words.
-        - Use polite forms (आपण / तुम्ही) consistently throughout the call.
-
-        Gujarati:
-        - Warm, conversational Gujarati — mix common English words naturally (e.g. payment, invoice, amount).
-        - Use Gujarati script only (no Roman transliteration).
-        - Every Gujarati sentence must end with । (danda), NEVER a period (.).
-        - Keep sentences under 20 words.
-        - Use polite forms (આપ / તમે) consistently throughout the call.
-
-        Bengali:
-        - Warm, conversational Bengali — mix common English words naturally (e.g. payment, invoice, amount).
-        - Use Bengali script only (no Roman transliteration).
-        - Every Bengali sentence must end with । (danda), NEVER a period (.).
-        - Keep sentences under 20 words.
-        - Use polite forms (আপনি) consistently throughout the call.
-
-        - If customer mixes any of these languages freely, respond in the same casual mixed style.
+        - If customer mixes English and Hindi freely, respond in the same casual mixed style.
 
         CLOSING THE CALL:
         Once you have the payment timeline or resolved the concern, close warmly:
-        English:  "Thank you for your time. Please feel free to reach out if you need anything. Have a great day!"
-        Hindi:    "आपके time के लिए thank you। कोई भी सवाल हो तो हमें call करें। Have a great day!"
-        Marathi:  "आपल्या वेळासाठी धन्यवाद। काही प्रश्न असल्यास आम्हाला call करा। Have a great day!"
-        Gujarati: "તમારા સમય બદલ આભાર। કોઈ પ્રશ્ન હોય તો અમને call કરો। Have a great day!"
-        Bengali:  "আপনার সময়ের জন্য ধন্যবাদ। কোনো প্রশ্ন থাকলে আমাদের call করুন। Have a great day!"
+        English: "Thank you for your time. Please feel free to reach out if you need anything. Have a great day!"
+        Hindi:   "आपके time के लिए thank you। कोई भी सवाल हो तो हमें call करें। Have a great day!"
         """
 
     logger.info(f"SYSTEM PROMPT ({'─'*60})\n{system_content}\n{'─'*70}")
